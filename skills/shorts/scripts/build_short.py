@@ -31,31 +31,65 @@ SUBS = [(s["in"], s["out"], s["text"]) for s in P.get("subs", [])]
 MONO = P.get("audio", {}).get("mono_channel", "0.5*c0+0.5*c1")
 
 
-def occurrences(t, hook=None):
-    """All output times where source time t is on screen (optionally hook-only/main-only)."""
-    out, acc = [], 0.0
-    for a, b, _, is_hook in SHOTS:
-        if a <= t <= b and (hook is None or hook == is_hook):
-            out.append(acc + t - a)
-        acc += b - a
+XF = P.get("transitions", {}).get("crossfade", 0.0)     # dissolve between runs (0 = hard cut)
+MOVE = P.get("transitions", {}).get("camera_move", 0.7)  # eased re-framing inside a run
+SETTLE = tuple(P.get("transitions", {}).get("settle", (1.0, 0.3)))  # each cut lands slightly tight, eases out
+
+
+def runs():
+    """Group shots that continue each other in source time into one camera run."""
+    out = []
+    for shot in SHOTS:
+        a, b, fr, hook = shot
+        if out and abs(out[-1]["b"] - a) < 1e-6 and out[-1]["hook"] == hook:
+            out[-1]["shots"].append(shot)
+            out[-1]["b"] = b
+        else:
+            out.append({"a": a, "b": b, "hook": hook, "shots": [shot]})
+    t = 0.0
+    for r in out:  # each run overlaps the previous one by XF (dissolve)
+        r["out"] = t
+        t += (r["b"] - r["a"]) - XF
     return out
 
 
+RUNS = runs()
+
+
+def occurrences(t, hook=None):
+    """All output times where source time t is on screen (optionally hook-only/main-only)."""
+    return [r["out"] + t - r["a"] for r in RUNS
+            if r["a"] <= t <= r["b"] and (hook is None or hook == r["hook"])]
+
+
 def main_time(t):
-    """Output time for a source time in the main edit; clamps into the next kept shot."""
-    acc, best = 0.0, None
-    for a, b, _, is_hook in SHOTS:
-        if not is_hook:
-            if a <= t <= b:
-                return acc + t - a
-            if t < a and best is None:
-                best = acc
-        acc += b - a
-    return best if best is not None else acc
+    """Output time for a source time in the main edit; clamps into the next kept run."""
+    best = None
+    for r in RUNS:
+        if r["hook"]:
+            continue
+        if r["a"] <= t <= r["b"]:
+            return r["out"] + t - r["a"]
+        if t < r["a"] and best is None:
+            best = r["out"]
+    return best if best is not None else main_len()
 
 
 def main_len():
-    return sum(b - a for a, b, _, _ in SHOTS)
+    """Where the main edit ends (the CTA dissolves in XF before this)."""
+    last = RUNS[-1]
+    return last["out"] + last["b"] - last["a"]
+
+
+def eased(values, bounds):
+    """ffmpeg expr: piecewise-constant values with smoothstep moves of MOVE s around each bound."""
+    e = f"{values[0]:.4f}"
+    for v0, v1, tb in zip(values, values[1:], bounds):
+        if abs(v1 - v0) < 1e-6:
+            continue
+        u = f"clip((in/{FPS}-{tb - MOVE / 2:.3f})/{MOVE:.3f},0,1)"
+        e += f"+({v1 - v0:.4f})*{u}*{u}*(3-2*{u})"
+    return e
 
 
 def rounded(img, r):
@@ -165,58 +199,103 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 pop = r"{\fscx75\fscy75\t(0,90,\fscx100\fscy100)}"
                 lines.append(f"Dialogue: 0,{ass_time(t)},{ass_time(t + dur)},Cap,,0,0,0,,{pop}{ks.strip().upper()}")
                 t += dur
-    open(path, "w").write(head + "\n".join(lines) + "\n")
+    # a dissolve can make the outgoing line overlap the next one: end each line where the next starts
+    ev = sorted(lines, key=lambda l: l.split(",")[1])
+    def secs(ts):
+        h, m, rest = ts.split(":")
+        return int(h) * 3600 + int(m) * 60 + float(rest)
+    for i in range(len(ev) - 1):
+        f = ev[i].split(",", 3)
+        nxt = secs(ev[i + 1].split(",")[1])
+        if secs(f[2]) > nxt:
+            f[2] = ass_time(nxt)
+            ev[i] = ",".join(f)
+    open(path, "w").write(head + "\n".join(ev) + "\n")
 
 
 def main():
     src, out = sys.argv[2], sys.argv[3]
     preview = "--preview" in sys.argv
     # warm, punchy restaurant look: gentle S-curve, a touch more colour, soft vignette
-    grade = (",curves=all='0/0 0.25/0.22 0.5/0.52 0.75/0.8 1/1',"
-             "eq=saturation=1.14:contrast=1.04,colorbalance=rs=-0.03:bs=0.04:rh=0.04:bh=-0.03,"
-             "vignette=angle=PI/5") if "--grade" in sys.argv else ""
+    # light grade: soft contrast, slight colour, and pull the warm/yellow cast back toward neutral
+    grade = (",colorchannelmixer=rr=0.95:gg=0.99:bb=1.09,eq=contrast=1.04:saturation=1.04:gamma=1.02"
+             if "--grade" in sys.argv else "")
     tmp = os.path.join(BASE, "build")
     os.makedirs(tmp, exist_ok=True)
     subprocess.run([sys.executable, os.path.join(SCRIPTS, "choice_sfx.py"), os.path.join(tmp, "choice.wav")], check=True)
     subprocess.run([sys.executable, os.path.join(SCRIPTS, "cta_sfx.py"), os.path.join(tmp, "sfx.wav"),
                     f"{max(CTA[1] - CTA[0], 1.5):.2f}"], check=True)
     write_ass(os.path.join(tmp, "subs.ass"))
+    music_cfg = P.get("music", {})
+    music = music_cfg.get("file") and os.path.join(BASE, music_cfg["file"])
+    if music_cfg.get("enabled", True) and not music:
+        music = os.path.join(tmp, "music.wav")
+        gen = {"upbeat": "upbeat_music.py", "lofi": "lofi_music.py"}[music_cfg.get("style", "upbeat")]
+        subprocess.run([sys.executable, os.path.join(SCRIPTS, gen), music,
+                        f"{main_len() + CTA[1] - CTA[0] + 1:.1f}"], check=True)
     mono = f"pan=stereo|c0={MONO}|c1={MONO}"  # both ears get the same mix (e.g. two lavs on L/R summed)
 
-    inputs, g, cat = [], [], ""
-    for k, (a, b, fr, _) in enumerate(SHOTS):
-        z, cx, cy = FRAME[fr]
-        cw, chh = W / z, H / z
-        x0 = min(max(cx * W - cw / 2, 0), W - cw)
-        y0 = min(max(cy * H - chh / 2, 0), H - chh)
+    inputs, g = [], []
+    for k, r in enumerate(RUNS):
+        a, b = r["a"], r["b"]
+        fr = [FRAME[f] for _, _, f, _ in r["shots"]]
+        bounds = [s_[1] - a for s_ in r["shots"][:-1]]
+        z = eased([f[0] for f in fr], bounds)
+        if SETTLE and SETTLE[0] != 1:
+            u = f"clip(in/{FPS}/{SETTLE[1]},0,1)"
+            z = f"({z})*(1+{SETTLE[0] - 1:.3f}*(1-{u}*{u}*(3-2*{u})))"
+        cx = eased([f[1] for f in fr], bounds)
+        cy = eased([f[2] for f in fr], bounds)
         inputs += ["-ss", f"{a:.3f}", "-t", f"{b - a + 0.3:.3f}", "-i", src]
-        # crop in source pixels (fractions of the frame) so close-ups keep full resolution
-        g.append(f"[{k}:v]crop=iw/{z}:ih/{z}:iw*{x0 / W:.4f}:ih*{y0 / H:.4f},"
-                 f"scale={W}:{H}:flags=lanczos{grade},"
-                 f"setsar=1,fps={FPS},trim=duration={b - a:.3f},setpts=PTS-STARTPTS[v{k}]")
-        g.append(f"[{k}:a]{mono},aresample=48000,atrim=duration={b - a:.3f},asetpts=PTS-STARTPTS,"
-                 f"afade=t=in:d=0.015,afade=t=out:st={b - a - 0.02:.3f}:d=0.02[a{k}]")
-        cat += f"[v{k}][a{k}]"
+        if len({f for f in fr}) == 1 and not (SETTLE and SETTLE[0] != 1):
+            # static framing: plain crop, no per-frame resampling, no jitter
+            zz, fx, fy = fr[0]
+            x0 = min(max(fx - 0.5 / zz, 0), 1 - 1 / zz)
+            y0 = min(max(fy - 0.5 / zz, 0), 1 - 1 / zz)
+            cam = f"crop=iw/{zz}:ih/{zz}:iw*{x0:.4f}:ih*{y0:.4f},scale={W}:{H}:flags=lanczos"
+        else:
+            # animated framing: oversample 2x first so zoompan's integer crop steps stay sub-pixel
+            cam = (f"scale=iw*2:ih*2:flags=bicubic,"
+                   f"zoompan=z='{z}':x='clip(({cx})*iw-iw/zoom/2,0,iw-iw/zoom)':"
+                   f"y='clip(({cy})*ih-ih/zoom/2,0,ih-ih/zoom)':d=1:s={W}x{H}:fps={FPS}")
+        g.append(f"[{k}:v]fps={FPS},setpts=PTS-STARTPTS,{cam}{grade},"
+                 f"setsar=1,trim=duration={b - a:.3f},setpts=PTS-STARTPTS[v{k}]")
+        g.append(f"[{k}:a]{mono},aresample=48000,atrim=duration={b - a:.3f},asetpts=PTS-STARTPTS[a{k}]")
     # blurred ending under the call to action
-    k = len(SHOTS)
+    k = len(RUNS)
     a, b = CTA
     d = b - a
     inputs += ["-ss", f"{a:.3f}", "-t", f"{d + 0.3:.3f}", "-i", src]
     g.append(f"[{k}:v]scale={W}:{H}:flags=lanczos{grade},setsar=1,fps={FPS},trim=duration={d:.3f},setpts=PTS-STARTPTS,"
              f"split[cs][cb]")
-    g.append("[cb]gblur=sigma=28,eq=brightness=-0.12,format=rgba,fade=t=in:st=0:d=0.45:alpha=1[cbl]")
+    g.append("[cb]gblur=sigma=28,eq=brightness=-0.12,format=rgba,fade=t=in:st=0:d=0.6:alpha=1[cbl]")
     g.append(f"[cs][cbl]overlay=0:0[v{k}]")
     g.append(f"[{k}:a]{mono},aresample=48000,atrim=duration={d:.3f},asetpts=PTS-STARTPTS,"
-             f"afade=t=out:st=0:d=0.3[a{k}]")
-    cat += f"[v{k}][a{k}]"
+             f"afade=t=out:st=0:d=0.5[a{k}]")
     n = k + 1
-    g.append(f"{cat}concat=n={n}:v=1:a=1[base][araw]")
-    last, idx = "base", n
     end_main = main_len()
+    starts = [r["out"] for r in RUNS] + [end_main - XF]
+    if XF > 0:
+        vl, al = "v0", "a0"
+        for j in range(1, n):
+            g.append(f"[{vl}][v{j}]xfade=transition=fade:duration={XF}:offset={starts[j]:.3f}[xv{j}]")
+            g.append(f"[{al}][a{j}]acrossfade=d={XF}:c1=tri:c2=tri[xa{j}]")
+            vl, al = f"xv{j}", f"xa{j}"
+        g.append(f"[{vl}]null[base]")
+        g.append(f"[{al}]anull[araw]")
+    else:  # hard cuts; 15 ms audio fades keep them click-free
+        for j in range(n):
+            g.append(f"[a{j}]afade=t=in:d=0.015,areverse,afade=t=in:d=0.015,areverse[af{j}]")
+        g.append("".join(f"[v{j}][af{j}]" for j in range(n)) + f"concat=n={n}:v=1:a=1[base][araw]")
+    cta_t = end_main - XF
+    total = cta_t + d
+    last, idx = "base", n
 
     def overlay_png(png, t0, t1, x, y, fin=True, fout=True, rise=0):
         nonlocal last, idx
-        inputs.extend(["-loop", "1", "-t", f"{t1 - t0:.3f}", "-i", png])
+        if not fout:  # hand over to the next state underneath it: no empty frame at the swap
+            t1 += 0.1
+        inputs.extend(["-loop", "1", "-framerate", str(FPS), "-t", f"{t1 - t0:.3f}", "-i", png])
         f = (f"fade=t=in:st=0:d=0.18:alpha=1," if fin else "") + \
             (f"fade=t=out:st={t1 - t0 - 0.15:.3f}:d=0.15:alpha=1," if fout else "")
         g.append(f"[{idx}:v]format=rgba,{f}setpts=PTS+{t0:.3f}/TB[c{idx}]")
@@ -230,7 +309,7 @@ def main():
         for s_i, (s0, s1, w) in enumerate(states):
             t0, t1 = main_time(s0), main_time(s1)
             if s1 == hide and hide >= SHOTS[-1][1]:
-                t1 = end_main
+                t1 = cta_t
             if t1 - t0 < 0.05:
                 continue
             png = os.path.join(tmp, f"card{c}_{s_i}.png")
@@ -241,14 +320,14 @@ def main():
                         rise=40 if s_i == 0 else 0)
     cta = os.path.join(tmp, "cta.png")
     cta_png(cta)
-    overlay_png(cta, end_main + 0.25, end_main + d, 0, 0, fout=False, rise=60)
+    overlay_png(cta, cta_t + 0.35, cta_t + d, 0, 0, fout=False, rise=60)
 
     sub = os.path.join(tmp, "subs.ass").replace(":", r"\:")
     fin_scale = ",scale=540:960" if preview else ""
     g.append(f"[{last}]subtitles='{sub}':fontsdir={FONT_DIR}{fin_scale},format=yuv420p[v]")
     inputs.extend(["-i", os.path.join(tmp, "sfx.wav")])
     g.append("[araw]highpass=f=80,loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[an]")
-    ms = int(end_main * 1000)
+    ms = int(cta_t * 1000)
     g.append(f"[{idx}:a]aresample=48000,pan=stereo|c0=c0|c1=c0,adelay={ms}|{ms}[sfx]")
     wins = [main_time(c[1]) for c in CARDS if c[1]]
     inputs.extend(["-i", os.path.join(tmp, "choice.wav")])
@@ -258,15 +337,26 @@ def main():
     for j, t in enumerate(wins):
         ms_c = int(t * 1000)
         g.append(f"[ch{j}]adelay={ms_c}|{ms_c}[chd{j}]")
-    g.append("[an][sfx]" + "".join(f"[chd{j}]" for j in range(len(wins)))
-             + f"amix=inputs={2 + len(wins)}:duration=first:normalize=0,alimiter=limit=0.95[a]")
+    mix_in = "[an][sfx]" + "".join(f"[chd{j}]" for j in range(len(wins)))
+    n_in = 2 + len(wins)
+    if music:
+        # bed ~12 dB under the voice that dips a few dB more while someone speaks
+        inputs.extend(["-i", music])
+        mi = ci + 1
+        vol = music_cfg.get("volume", 0.55)
+        g.append("[an]asplit[an_mix][an_key]")
+        g.append(f"[{mi}:a]aresample=48000,aformat=channel_layouts=stereo,loudnorm=I=-18:TP=-2,volume={vol},"
+                 f"afade=t=out:st={total - 1.8:.3f}:d=1.8[mus]")
+        g.append("[mus][an_key]sidechaincompress=threshold=0.05:ratio=3:attack=60:release=600[mduck]")
+        mix_in = mix_in.replace("[an]", "[an_mix]", 1) + "[mduck]"
+        n_in += 1
+    g.append(mix_in + f"amix=inputs={n_in}:duration=first:normalize=0,alimiter=limit=0.95[a]")
     enc = (["-c:v", "libx264", "-preset", "medium", "-crf", "30", "-c:a", "aac", "-b:a", "96k"]
            if preview else
            ["-c:v", "libx264", "-preset", "slow", "-crf", "16", "-profile:v", "high",
             "-c:a", "aac", "-b:a", "256k"])
     script = os.path.join(tmp, "graph.txt")
     open(script, "w").write(";\n".join(g))
-    total = end_main + d
     subprocess.run(["ffmpeg", "-y", "-v", "error", *inputs, "-filter_complex_script", script,
                     "-map", "[v]", "-map", "[a]", "-r", str(FPS), "-t", f"{total:.3f}", *enc,
                     "-movflags", "+faststart", out], check=True)

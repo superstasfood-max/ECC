@@ -6,7 +6,7 @@
   "fps": 30
  },
  "audio": {
-  "mono_channel": "c0"
+  "mono_channel": "0.5*c0+0.5*c1"
  },
  "framing": {
   "wide": [

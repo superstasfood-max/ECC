@@ -66,7 +66,7 @@ Project schema (see `examples/food-choice.json`):
 | `items{}` | per option: `icon` (Fluent name) and optional `photo` file in `photos/` (photo wins if present) |
 | `subs[]` | `in`/`out`/`text`. Hand-corrected text, split into 2–3 word karaoke chunks automatically |
 | `cta` | blurred tail source range and button labels |
-| `audio.mono_channel` | `c0`/`c1`. Use one mic when the camera's stereo pair is offset ("звук в разных наушниках") |
+| `audio.mono_channel` | pan expression for a mono mix in both ears. Two lavs on L/R → `0.5*c0+0.5*c1` (measure per speaker first). A single offset stereo mic pair → `c0` or `c1` |
 
 ### 4. Review proxy → final
 
@@ -106,7 +106,7 @@ Typical revision requests and where they land:
 
 | request | change |
 |---------|--------|
-| "звук в разных наушниках" | `audio.mono_channel` |
+| "звук в разных наушниках" | `audio.mono_channel`. Check which speaker is louder in each channel; two lavs must be summed, not one picked |
 | "рваное начало" | extend shot `out` past the last word end |
 | "гость не произносит выбор" | add the answer shot, move `win_at` onto the spoken word |
 | "карточки перекрывают" | card overlay y / scale in `build_short.py` |

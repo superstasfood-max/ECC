@@ -28,7 +28,7 @@ CTA = (CTA_CFG.get("in", 0), CTA_CFG.get("out", 0))
 CARDS = [(c["show"], c.get("win_at"), c["hide"], c["left"], c["right"], c.get("winner"))
          for c in P.get("cards", [])]
 SUBS = [(s["in"], s["out"], s["text"]) for s in P.get("subs", [])]
-MONO = P.get("audio", {}).get("mono_channel", "c0")
+MONO = P.get("audio", {}).get("mono_channel", "0.5*c0+0.5*c1")
 
 
 def occurrences(t, hook=None):
@@ -181,7 +181,7 @@ def main():
     subprocess.run([sys.executable, os.path.join(SCRIPTS, "cta_sfx.py"), os.path.join(tmp, "sfx.wav"),
                     f"{max(CTA[1] - CTA[0], 1.5):.2f}"], check=True)
     write_ass(os.path.join(tmp, "subs.ass"))
-    mono = f"pan=stereo|c0={MONO}|c1={MONO}"  # camera's two mics disagree; use the cleaner left one
+    mono = f"pan=stereo|c0={MONO}|c1={MONO}"  # both ears get the same mix (e.g. two lavs on L/R summed)
 
     inputs, g, cat = [], [], ""
     for k, (a, b, fr, _) in enumerate(SHOTS):

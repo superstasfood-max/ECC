@@ -2,7 +2,8 @@
 """Send a message or a video to the user's Telegram via their own bot.
 Needs TELEGRAM_BOT_TOKEN as a plain environment variable (the token lives in the URL path, so
 header-injecting "network secrets" cannot carry it) and api.telegram.org allowed.
-Chat id: --chat, $TELEGRAM_CHAT_ID, or the latest private chat that messaged the bot (/start).
+Chat id: --chat, $TELEGRAM_CHAT_ID, the latest private chat that messaged the bot (/start; Telegram
+keeps those for 24 h), or the last chat used (cached in ~/.cache/shorts/tg_chat_id).
 Bot API uploads cap at 50 MB, so larger videos are re-encoded (2-pass) to ~45 MB first.
 
 usage: tg_send.py --text "hello"
@@ -10,6 +11,7 @@ usage: tg_send.py --text "hello"
 import json, os, subprocess, sys, tempfile, urllib.parse, urllib.request
 
 LIMIT = 49 * 1024 * 1024
+CACHE = os.path.expanduser("~/.cache/shorts/tg_chat_id")  # getUpdates forgets chats after 24 h
 TARGET_MB = 45
 
 
@@ -43,6 +45,8 @@ def chat_id(arg):
         chat = (u.get("message") or {}).get("chat", {})
         if chat.get("type") == "private":
             return str(chat["id"])
+    if os.path.isfile(CACHE):
+        return open(CACHE).read().strip()
     sys.exit("[tg_send] no chat found: open the bot in Telegram and press Start, or pass --chat")
 
 
@@ -66,6 +70,8 @@ def main():
     args = sys.argv[1:]
     opt = lambda k: args[args.index(k) + 1] if k in args else None
     chat = chat_id(opt("--chat"))
+    os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+    open(CACHE, "w").write(chat)
     if opt("--text"):
         api("sendMessage", {"chat_id": chat, "text": opt("--text")})
         print("[tg_send] message sent")

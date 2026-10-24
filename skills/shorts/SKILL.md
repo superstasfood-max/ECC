@@ -114,6 +114,25 @@ vignettes, and warm highlight tints read as "too harsh / too yellow".
 - **Masters**: a private GitHub repo the user creates (integrations usually cannot create repos);
   files under 100 MB commit directly.
 
+## Other recipes (`recipes/`)
+
+Each recipe is a self-contained editor whose shot list, captions, and chapters sit at the top of
+the file. Copy it next to the footage, edit the lists, then run it from that folder (it writes `build/`).
+
+| recipe | use for | key choices that landed |
+|--------|---------|-------------------------|
+| `recap_beat_edit.py SRC_DIR .MOV out.mp4 [--preview]` | trip / event recap from many phone clips (UFC 333: Moscow → Abu Dhabi) | shots measured in bars of `scripts/phonk_music.py` (150 BPM); calm filtered intro, then riser, flash and impact on the drop; cuts land 7 % tight and settle; live sound at ~20 % under the music; 60 fps master. Section chips and end titles were cut on review |
+| `trend_then_now_edit.py SRC_DIR .MOV out.mp4` | "смотреть X по телевизору / вживую" contrast trend | 2 bars of one calm shot + caption, flash on the drop, then 2-beat cuts; captions white with black stroke in the lower third (above the Shorts UI); the old caption leaves 0.12 s before the flash and the new one fades in after it, so they never overlap |
+| `review_longform_edit.py SRC out.mp4 [--preview]` (`REVIEW_ASR=asr.json`) | 16:9 talking-head review / unboxing | hand-corrected text per ASR segment (`None` drops a take); silences squeezed to 0.35 s except listed product "showcase" gaps; alternate 1.0 / 1.14 punch-ins; chapter pills; one-line 3–4 word karaoke subtitles in sentence case; renders each cut to its own file first (130 simultaneous 4K inputs run out of memory) |
+
+Footage triage that saved time: read `creationdate` and its UTC offset to rebuild the story order
+(+03:00 Moscow vs +04:00 Abu Dhabi); build a 6-frames-per-clip contact sheet before choosing in-points;
+render previews from 540×960 proxies and the master from the originals.
+
+Music generators in `scripts/`: `upbeat_music.py` (pop 112 BPM), `lofi_music.py` (84 BPM),
+`phonk_music.py` (drift phonk 150 BPM, filtered intro → drop), `trap_music.py` (dark half-time trap 140 BPM).
+"Make it more dynamic" usually means phonk over trap, and faster cuts follow the faster tempo.
+
 ## Examples
 
 Food-choice game, 1:49 raw 4K → 62 s Short:
